@@ -1,7 +1,11 @@
+import VideoTagParser from './core/video-tag-parser';
+import AudioTagParser from './core/audio-tag-parser';
+import ScriptTagParser from './core/script-tag-parser';
+
 import { EventEmitter } from 'events';
 import logger from './utils/logger';
 import { combineBits } from './utils/bitCalc';
-import { DemuxerEvent, TagType } from './types';
+import { DemuxerEvent, TagHeader, TagType } from './types';
 
 export default class FlvDemuxerCore {
   private event: EventEmitter;
@@ -10,12 +14,16 @@ export default class FlvDemuxerCore {
   private hasVideo: boolean;
   private hasAudio: boolean;
 
+  private videoTagParser: VideoTagParser;
+
   constructor() {
     this.event = new EventEmitter();
     this.consumedBytes = 0;
     this.remainBuffer = new ArrayBuffer(0);
     this.hasAudio = false;
     this.hasVideo = false;
+
+    this.videoTagParser = new VideoTagParser();
   }
 
   parse(chunk: ArrayBuffer) {
@@ -23,16 +31,18 @@ export default class FlvDemuxerCore {
     if (!this.consumedBytes) {
       const isMatch = this.isFlv(chunk);
 
-      if (!isMatch) {
-        this.throwError("the stream' format is not flv!");
-      }
+      logger.errorCdt(isMatch, "the stream's format is not flv!");
     }
 
     this.parseData(chunk);
   }
 
   on(name: DemuxerEvent, callback: (...args: any[]) => void) {
-    this.event.on(name, callback);
+    if (name === DemuxerEvent.Error) {
+      logger.onOutError(callback);
+    } else {
+      this.event.on(name, callback);
+    }
   }
 
   private isFlv(chunk: ArrayBuffer) {
@@ -73,9 +83,10 @@ export default class FlvDemuxerCore {
       const hasAudio = (ui8a[4] & 0b00000100) >>> 2 === 1;
       const hasVideo = (ui8a[4] & 0b00000001) === 1;
 
-      if (flvVersion !== 1) {
-        this.throwError(`the flv version ${flvVersion} is not support!`);
-      }
+      logger.errorCdt(
+        flvVersion === 1,
+        `the flv version ${flvVersion} is not support!`
+      );
 
       this.hasAudio = hasAudio;
       this.hasVideo = hasVideo;
@@ -85,37 +96,69 @@ export default class FlvDemuxerCore {
     }
   }
 
-  private parsePrevTagSize(buffer: ArrayBuffer, offset: number): number {
-    const ui8a = new Uint8Array(buffer, offset, 4);
+  private parsePrevTagSize(buffer: ArrayBuffer): number {
+    const ui8a = new Uint8Array(buffer);
     const prevTagSize = combineBits([ui8a[0], ui8a[1], ui8a[2], ui8a[3]]);
 
     return prevTagSize;
   }
 
-  private parseTagHeader(
-    buffer: ArrayBuffer,
-    offset: number
-  ): { tagType: string; tagDataSize: number; pts: number; streamId: number } {
-    const ui8a = new Uint8Array(buffer, offset + 4, 11);
+  private parseTagHeader(buffer: ArrayBuffer): TagHeader {
+    const ui8a = new Uint8Array(buffer);
     const tagType = this.getTagType(ui8a[0]);
     const tagDataSize = combineBits([ui8a[1], ui8a[2], ui8a[3]]);
-    const pts = combineBits([ui8a[7], ui8a[4], ui8a[5], ui8a[6]]);
+    const timestamp = combineBits([ui8a[7], ui8a[4], ui8a[5], ui8a[6]]);
     const streamId = combineBits([ui8a[8], ui8a[9], ui8a[10]]);
-    return { tagType, tagDataSize, pts, streamId };
+    return { tagType, tagDataSize, timestamp, streamId };
   }
 
   private parseFlvBody(buffer: ArrayBuffer): ArrayBuffer {
     let consumed = 0;
 
     while (buffer.byteLength - consumed >= 15) {
-      const prevTagSize = this.parsePrevTagSize(buffer, consumed);
-      const tagHeader = this.parseTagHeader(buffer, consumed);
-      const { tagDataSize } = tagHeader;
+      // 15 = 4 length in bytes of prevTagSize + 11 length in bytes of tag header
+      const prevTagSize = this.parsePrevTagSize(
+        buffer.slice(consumed, consumed + 4)
+      );
+      const tagHeader = this.parseTagHeader(
+        buffer.slice(consumed + 4, consumed + 15)
+      );
+
+      const { tagDataSize, tagType } = tagHeader;
 
       if (buffer.byteLength - consumed - 15 >= tagDataSize) {
-        // parse tag body
-        this.event.emit(DemuxerEvent.Data, { prevTagSize });
-        this.event.emit(DemuxerEvent.Data, tagHeader);
+        // parse tag totally
+        const tagBody = buffer.slice(
+          consumed + 15,
+          consumed + 15 + tagDataSize
+        );
+
+        switch (tagType) {
+          case TagType.Video:
+            const { videoTagInfo, NALUs } = this.videoTagParser.parse(
+              tagBody,
+              tagHeader
+            );
+
+            this.event.emit(DemuxerEvent.Data, videoTagInfo);
+            this.event.emit(DemuxerEvent.Data, NALUs);
+            break;
+
+          case TagType.Audio:
+            //   this.audioTagParser.parse();
+            break;
+
+          case TagType.ScriptData:
+            //   this.scriptTagParser.parse();
+            break;
+
+          default:
+            logger.error('unknown tag type!');
+            break;
+        }
+
+        // this.event.emit(DemuxerEvent.Data, { prevTagSize });
+        // this.event.emit(DemuxerEvent.Data, tagHeader);
         consumed += 15 + tagDataSize;
       } else {
         // wait for enougth data to parse
@@ -127,16 +170,11 @@ export default class FlvDemuxerCore {
     return this.consumeBuffer(buffer, consumed);
   }
 
-  private throwError(msg: string) {
-    const err = new Error(msg);
-    this.event.emit(DemuxerEvent.Error, err);
-    logger.error(err);
-  }
-
   private consumeBuffer(buffer: ArrayBuffer, consumeSize: number): ArrayBuffer {
-    if (buffer.byteLength < consumeSize) {
-      this.throwError('the consumeSize is bigger than buffer!');
-    }
+    logger.errorCdt(
+      buffer.byteLength >= consumeSize,
+      'the consumeSize is bigger than buffer!'
+    );
 
     if (buffer.byteLength === consumeSize) {
       return new ArrayBuffer(0);
@@ -165,7 +203,7 @@ export default class FlvDemuxerCore {
         return TagType.ScriptData;
 
       default:
-        this.throwError(`invalid tag type: ${ui8}`);
+        logger.error(`invalid tag type: ${ui8}`);
         return TagType.Unknown;
     }
   }

@@ -2,15 +2,38 @@
   <head>
     <title>flv-demuxer-demo</title>
     <meta charset="utf-8" />
+    <style>
+      body {
+        background-color: #eee;
+      }
+
+      input,
+      textarea,
+      button {
+        display: block;
+        margin: 5px;
+      }
+
+      input,
+      textarea {
+        width: 800px;
+      }
+
+      textarea {
+        height: 800px;
+      }
+    </style>
   </head>
   <body>
     <input
       class="url"
       placeholder="enter your http-flv stream url"
-      value="http://live-pull-ks.imlizhi.com/live/jshao2.flv"
+      value="http://live-pull-bs.imlizhi.com/live/jshao.flv"
       width="400"
     />
+    <textarea class="output"></textarea>
     <button class="playBtn">play it!</button>
+    <button class="stopBtn">stop it!</button>
     <script src="./boundle.js"></script>
   </body>
 </html>
