@@ -141,7 +141,10 @@ export default class FlvDemuxerCore {
             );
 
             this.event.emit(DemuxerEvent.Data, videoTagInfo);
-            this.event.emit(DemuxerEvent.Data, NALUs);
+            NALUs.forEach(NALU =>
+              this.event.emit(DemuxerEvent.Data, { type: 'NALU', data: NALU })
+            );
+            // this.event.emit(DemuxerEvent.Data, NALUs);
             break;
 
           case TagType.Audio:
