@@ -5,7 +5,14 @@ import ScriptTagParser from './core/script-tag-parser';
 import { EventEmitter } from 'events';
 import logger from './utils/logger';
 import { combineBits } from './utils/bitCalc';
-import { DemuxerEvent, TagHeader, TagType } from './types';
+import {
+  DemuxerEvent,
+  TagHeader,
+  TagType,
+  AudioMetaData,
+  DemuxerDataType,
+  VideoMetaData,
+} from './types';
 
 export default class FlvDemuxerCore {
   private event: EventEmitter;
@@ -15,6 +22,7 @@ export default class FlvDemuxerCore {
   private hasAudio: boolean;
 
   private videoTagParser: VideoTagParser;
+  private audioTagParser: AudioTagParser;
 
   constructor() {
     this.event = new EventEmitter();
@@ -24,6 +32,37 @@ export default class FlvDemuxerCore {
     this.hasVideo = false;
 
     this.videoTagParser = new VideoTagParser();
+    this.audioTagParser = new AudioTagParser();
+
+    this.videoTagParser.onMetaDataParsed((data: VideoMetaData) => {
+      this.event.emit(DemuxerEvent.Data, {
+        type: DemuxerDataType.VideoMetaData,
+        data,
+      });
+    });
+
+    this.videoTagParser.onNALUsParsed((NALUs: ArrayBuffer[]) => {
+      NALUs.forEach(NALU =>
+        this.event.emit(DemuxerEvent.Data, {
+          type: DemuxerDataType.NALU,
+          data: NALU,
+        })
+      );
+    });
+
+    this.audioTagParser.onMetaDataParsed((data: AudioMetaData) => {
+      this.event.emit(DemuxerEvent.Data, {
+        type: DemuxerDataType.AudioMetaData,
+        data,
+      });
+    });
+
+    this.audioTagParser.onRawDataParsed(data => {
+      this.event.emit(DemuxerEvent.Data, {
+        type: DemuxerDataType.AACRawData,
+        data,
+      });
+    });
   }
 
   parse(chunk: ArrayBuffer) {
@@ -135,20 +174,11 @@ export default class FlvDemuxerCore {
 
         switch (tagType) {
           case TagType.Video:
-            const { videoTagInfo, NALUs } = this.videoTagParser.parse(
-              tagBody,
-              tagHeader
-            );
-
-            this.event.emit(DemuxerEvent.Data, videoTagInfo);
-            NALUs.forEach(NALU =>
-              this.event.emit(DemuxerEvent.Data, { type: 'NALU', data: NALU })
-            );
-            // this.event.emit(DemuxerEvent.Data, NALUs);
+            this.videoTagParser.parse(tagBody, tagHeader);
             break;
 
           case TagType.Audio:
-            //   this.audioTagParser.parse();
+            this.audioTagParser.parse(tagBody, tagHeader);
             break;
 
           case TagType.ScriptData:
@@ -160,8 +190,6 @@ export default class FlvDemuxerCore {
             break;
         }
 
-        // this.event.emit(DemuxerEvent.Data, { prevTagSize });
-        // this.event.emit(DemuxerEvent.Data, tagHeader);
         consumed += 15 + tagDataSize;
       } else {
         // wait for enougth data to parse

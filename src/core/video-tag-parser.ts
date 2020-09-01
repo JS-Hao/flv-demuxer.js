@@ -1,27 +1,26 @@
 import logger from '../utils/logger';
 import { combineBits } from '../utils/bitCalc';
 import { getUint8ArrayReader } from '../utils/readBuffer';
+import mergeBuffer from '../utils/mergeBuffer';
 
 import {
-  Noun,
   TagHeader,
-  VideoTagInfo,
+  VideoMetaData,
   AVCDecoderConfigurationRecord,
 } from '../types';
 
 export default class VideoTagParser {
   private nalStart = new Uint8Array([0x00, 0x00, 0x00, 0x01]);
   private AVCDecoderConfigurationRecord?: AVCDecoderConfigurationRecord;
+  private handleNALUsParsed?: (data: ArrayBuffer[]) => void;
+  private handleMetaDataParsed?: (data: VideoMetaData) => void;
 
   /**
    * parse the video tag
    * @param buffer the buffer of the tag body
    * @param tagHeader the header is parsed to specified format
    */
-  parse(
-    buffer: ArrayBuffer,
-    tagHeader: TagHeader
-  ): { videoTagInfo: VideoTagInfo; NALUs: ArrayBuffer[] } {
+  parse(buffer: ArrayBuffer, tagHeader: TagHeader) {
     // parse tag data infomatioin
     const tagBody = new Uint8Array(buffer);
     const frameType = (tagBody[0] & 0b11110000) >> 4;
@@ -39,19 +38,6 @@ export default class VideoTagParser {
       `Unknown AVCPacketType: ${AVCPacketType}`
     );
 
-    const videoTagInfo: VideoTagInfo = {
-      type: Noun.VideoTagInfo,
-      data: {
-        frameType,
-        codecId,
-        AVCPacketType,
-        compositionTime,
-        pts,
-      },
-    };
-
-    let NALUs: ArrayBuffer[] = [];
-
     const remainData = buffer.slice(5);
 
     if (AVCPacketType === 0) {
@@ -62,22 +48,35 @@ export default class VideoTagParser {
       } = this.parseAVCRecorderConfigurationRecord(remainData);
 
       this.AVCDecoderConfigurationRecord = AVCDecoderConfigurationRecord;
-      videoTagInfo.data.AVCDecoderConfigurationRecord = AVCDecoderConfigurationRecord;
-      NALUs = NALUs.concat(PartNALUs);
+
+      this.handleMetaDataParsed &&
+        this.handleMetaDataParsed({
+          frameType,
+          codecId,
+          AVCPacketType,
+          compositionTime,
+          pts,
+          AVCDecoderConfigurationRecord,
+        });
+
+      this.handleNALUsParsed && this.handleNALUsParsed(PartNALUs);
     } else if (AVCPacketType === 1) {
       // parse the AVC NALU
-      NALUs = NALUs.concat(
-        this.parseNALUs(
-          remainData,
-          this.AVCDecoderConfigurationRecord?.lengthSizeMinusOne
-        ).NALUs
+      const NALUs = this.parseNALUs(
+        remainData,
+        this.AVCDecoderConfigurationRecord?.lengthSizeMinusOne
       );
-    }
 
-    return {
-      videoTagInfo,
-      NALUs,
-    };
+      this.handleNALUsParsed && this.handleNALUsParsed(NALUs);
+    }
+  }
+
+  onMetaDataParsed(callback: (data: VideoMetaData) => void) {
+    this.handleMetaDataParsed = callback;
+  }
+
+  onNALUsParsed(callback: (data: ArrayBuffer[]) => void) {
+    this.handleNALUsParsed = callback;
   }
 
   private parseAVCRecorderConfigurationRecord(
@@ -98,7 +97,7 @@ export default class VideoTagParser {
     for (let index = 0; index < numOfSequenceParameterSets; index++) {
       const SPSSize = this.readBufferSum(reader(2));
       const SPS = reader(SPSSize);
-      NALUs.push(this.mergeBuffer(this.nalStart, SPS));
+      NALUs.push(mergeBuffer(this.nalStart, SPS));
     }
 
     const numOfPictureParameterSets = reader(1)[0];
@@ -106,7 +105,7 @@ export default class VideoTagParser {
     for (let index = 0; index < numOfPictureParameterSets; index++) {
       const PPSSize = this.readBufferSum(reader(2));
       const PPS = reader(PPSSize);
-      NALUs.push(this.mergeBuffer(this.nalStart, PPS));
+      NALUs.push(mergeBuffer(this.nalStart, PPS));
     }
 
     logger.errorCdt(
@@ -133,7 +132,7 @@ export default class VideoTagParser {
   private parseNALUs(
     buffer: ArrayBuffer,
     lengthSizeMinusOne?: number
-  ): { NALUs: ArrayBuffer[] } {
+  ): ArrayBuffer[] {
     logger.errorCdt(
       lengthSizeMinusOne === 1 ||
         lengthSizeMinusOne === 3 ||
@@ -147,10 +146,10 @@ export default class VideoTagParser {
     while (!isEnd()) {
       const NALUSize = this.readBufferSum(reader(lengthSizeMinusOne as number));
       const NALU = reader(NALUSize);
-      NALUs.push(this.mergeBuffer(this.nalStart, NALU));
+      NALUs.push(mergeBuffer(this.nalStart, NALU));
     }
 
-    return { NALUs };
+    return NALUs;
   }
 
   private readBufferSum(array: Uint8Array, uint = true) {
@@ -159,20 +158,5 @@ export default class VideoTagParser {
         totle + (uint ? num : num - 128) * 256 ** (array.length - index - 1),
       0
     );
-  }
-
-  private mergeBuffer(...buffers: Array<Uint8Array>) {
-    const length = buffers.map(v => v.byteLength).reduce((v1, v2) => v1 + v2);
-    const mergedBuffer = new ArrayBuffer(length);
-    const mergedUi8a = new Uint8Array(mergedBuffer);
-
-    let offset = 0;
-
-    buffers.forEach(buffer => {
-      mergedUi8a.set(buffer, offset);
-      offset += buffer.byteLength;
-    });
-
-    return mergedBuffer;
   }
 }
